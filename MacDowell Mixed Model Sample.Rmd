@@ -1,0 +1,2332 @@
+---
+title: "LPA Main Analysis"
+author: "Cullen MacDowell"
+date: "5/11/2022"
+output: html_document
+---
+
+Purpose: Use mixed models to assess whether fidelity profiles predict gains
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(haven)
+library(writexl)
+# library(lme4)
+library(lmerTest)
+library(broom.mixed)
+```
+
+```{r import data}
+lpa_3class <- read_table(file = "/data/share/fnc/ExCELP3/Secure/Data/Mplus/LPA (3 Year)/adh and qual/3 groups/adh_qual_3class.csv",
+                         na = "*",
+                         col_names = c("Y1_adh", "Y2_adh", "Y3_adh", "Y1_qua", "Y2_qua", "Y3_qua",
+                                       "CPROB1", "CPROB2", "CPROB3", "class", "studentid"))%>%
+  mutate(studentid = as.character(studentid))
+
+master <- read_sas("/data/share/fnc/excelp3/secure/data/sas/CHILDCLASSMASTER_Y_ALL.sas7bdat")
+# View(head(master))
+
+lpa_4class292 <- read_table(file = "/data/share/fnc/ExCELP3/Secure/Data/Mplus/LPA (3 Year)/adh and qual/4 groups/adh_qual_4class_292.csv",
+                         na = "*",
+                         col_names = c("Y1_adh", "Y2_adh", "Y3_adh", "Y1_qua", "Y2_qua", "Y3_qua",
+                                       "CPROB1", "CPROB2", "CPROB3", "CPROB4", "class", "studentid"))%>%
+  mutate(studentid = as.character(studentid))
+
+lpa_4class_nopeg <- read_table(file = "/data/share/fnc/ExCELP3/Secure/Data/Mplus/LPA (3 Year)/adh and qual/4 groups/adh_qual_4class_nopeg.csv",
+                         na = "*",
+                         col_names = c("Y1_adh", "Y2_adh", "Y3_adh", "Y1_qua", "Y2_qua", "Y3_qua",
+                                       "CPROB1", "CPROB2", "CPROB3", "CPROB4", "class", "studentid"))%>%
+  mutate(studentid = as.character(studentid))
+
+lpa_3class_nopeg <- read_table(file = "/data/share/fnc/ExCELP3/Secure/Data/Mplus/LPA (3 Year)/adh and qual/3 groups/adh_qual_3class_nopeg.csv",
+                         na = "*",
+                         col_names = c("Y1_adh", "Y2_adh", "Y3_adh", "Y1_qua", "Y2_qua", "Y3_qua",
+                                       "CPROB1", "CPROB2", "CPROB3", "class", "studentid"))%>%
+  mutate(studentid = as.character(studentid))
+
+```
+# Prep Work
+```{r process data}
+
+analytic_df <- left_join(lpa_3class%>%rename("lpa3_class" = "class"),
+                         master,
+                         "studentid")%>%
+  mutate(
+    #create latent profile class dummies
+         lp_high_aligned = if_else(lpa3_class==3,1,0),
+         lp_mixed_alignment = if_else(lpa3_class==2,1,0),
+         lp_low_aligned = if_else(lpa3_class==1,1,0),
+    #average the adherance and quality measures by year
+       across(.cols = ends_with("_adh"), .fns = ~ (.x*4)+1, .names = "{.col}_1_5"))%>% #convert adherence to a 1 to 5 scale
+        rowwise()%>%mutate(Y1_qua_adh = mean(c(Y1_adh_1_5,Y1_qua)),
+                           Y2_qua_adh = mean(c(Y2_adh_1_5,Y2_qua)),
+                           Y3_qua_adh = mean(c(Y3_adh_1_5,Y3_qua)))%>%ungroup()%>%
+    #create qua_adh above median flags
+  mutate(Y1_qua_adh_high =if_else(Y1_qua_adh >= median(Y1_qua_adh,na.rm = TRUE),1,0),
+         Y2_qua_adh_high =if_else(Y2_qua_adh >= median(Y2_qua_adh,na.rm = TRUE),1,0),
+         Y3_qua_adh_high =if_else(Y3_qua_adh >= median(Y3_qua_adh,na.rm = TRUE),1,0))%>%
+    #create median split class dummies
+        rowwise()%>%mutate(qua_adh_high_avg = mean(c(Y1_qua_adh_high,Y2_qua_adh_high,Y3_qua_adh_high),na.rm = TRUE))%>%ungroup()%>% #creating a helper variable
+  mutate(med_high_aligned = if_else(qua_adh_high_avg==1,1,0),
+         med_mixed_alignment = if_else(!qua_adh_high_avg %in% c(0,1),1,0),
+         med_low_aligned = if_else(qua_adh_high_avg==0,1,0))
+
+
+#checking the latent profile classes
+analytic_df%>%select(starts_with("lp"))%>%group_by_all()%>%tally()
+
+#checking the adherance conversion
+analytic_df%>%group_by(Y1_adh,Y1_adh_1_5)%>%tally()
+analytic_df%>%group_by(Y2_adh,Y2_adh_1_5)%>%tally()
+analytic_df%>%group_by(Y3_adh,Y3_adh_1_5)%>%tally()
+
+#checking the quality-adherance average
+analytic_df%>%group_by(Y1_qua_adh,Y1_qua,Y1_adh_1_5)%>%tally()
+analytic_df%>%group_by(Y2_qua_adh,Y2_qua,Y2_adh_1_5)%>%tally()
+analytic_df%>%group_by(Y3_qua_adh,Y3_qua,Y3_adh_1_5)%>%tally()
+
+#checking the qua_adh median flags
+analytic_df%>%group_by(Y1_qua_adh_high)%>%tally()
+analytic_df%>%group_by(Y2_qua_adh_high)%>%tally()
+analytic_df%>%group_by(Y3_qua_adh_high)%>%tally()
+
+#checking the median split class dummies
+analytic_df%>%group_by(qua_adh_high_avg,
+                       med_high_aligned,med_mixed_alignment,med_low_aligned,
+                       Y1_qua_adh_high,Y2_qua_adh_high,Y3_qua_adh_high)%>%tally()
+
+analytic_df%>%group_by(med_high_aligned,med_mixed_alignment,med_low_aligned)%>%tally()
+
+#turn off scientific notation for later
+options(scipen=999)
+
+```
+
+```{r some additional checks}
+master_check <- master%>%
+  mutate(ppvt_s19_notmissing = if_else(!is.na(ppvt_s19_rawscore),1,0),
+         ppvt_s18_notmissing = if_else(!is.na(ppvt_s18_rawscore),1,0),
+         ppvt_f17_notmissing = if_else(!is.na(ppvt_f17_rawscore),1,0),
+         ppvt_s17_notmissing = if_else(!is.na(ppvt_s17_rawscore),1,0),
+         ppvt_f16_notmissing = if_else(!is.na(ppvt_f16_rawscore),1,0),
+         y1_adh_notmissing = if_else(!is.na(fd_y1_adh_avg),1,0),
+         y2_adh_notmissing = if_else(!is.na(fd_y2_adh_avg),1,0),
+         y3_adh_notmissing = if_else(!is.na(fd_y3_adh_avg),1,0),
+         y1_qua_notmissing = if_else(!is.na(fd_y1_qual_avg),1,0),
+         y2_qua_notmissing = if_else(!is.na(fd_y2_qual_avg),1,0),
+         y3_qua_notmissing = if_else(!is.na(fd_y3_qual_avg),1,0),
+         y3_id_notmissing = if_else(!is.na(classidanlys_y3),1,0)
+         )
+
+master_check%>%group_by(ppvt_s19_notmissing)%>%tally()
+sum(!is.na(master$ppvt_s19_rawscore))
+
+master_check%>%group_by(ppvt_f16_notmissing)%>%tally()
+sum(!is.na(master$ppvt_f16_rawscore))
+
+master_check%>%group_by(y3_id_notmissing,y3_qua_notmissing,y3_adh_notmissing,ppvt_s19_notmissing,ppvt_s18_notmissing)%>%tally()
+master_check%>%group_by(ppvt_s18_notmissing,ppvt_f17_notmissing)%>%tally()
+master_check%>%group_by(ppvt_s17_notmissing,ppvt_f16_notmissing)%>%tally()
+
+names(select(master,contains("wap")))
+
+sum(!is.na(master$child_age_s19_imp))
+sum(!is.na(master$bl_lunch))
+sum(!is.na(master$bl_females))
+sum(!is.na(master$bl_zpoth))
+sum(!is.na(master$bl_raceasian))
+sum(!is.na(master$bl_raceblack))
+sum(!is.na(master$bl_racehisp))
+sum(!is.na(master$bl_raceother))
+
+sum(!is.na(master$ps_y1y2y3_mothage))
+sum(!is.na(master$ps_y1y2y3_hhsize))
+sum(!is.na(master$ps_y1y2y3_adultwork))
+sum(!is.na(master$ps_y1y2y3_married))
+sum(!is.na(master$ps_y1y2y3_parentage))
+sum(!is.na(master$ps_y1y2y3_parented_2yrdeg))
+sum(!is.na(master$ps_y1y2y3_parented_ba))
+sum(!is.na(master$ps_y1y2y3_parented_graddeg))
+
+sum(!is.na(master$y1_testdatediff))
+sum(!is.na(master$y2_testdatediff))
+sum(!is.na(master$y2_y3_testdatediff))
+
+
+summary(master$wap_s18_stdscore)
+```
+
+```{r miscellaneous checks}
+
+names(select(master,contains("testdatedif")))
+
+master%>%group_by(ies)%>%tally()
+
+
+```
+
+```{r specifying variable groups}
+
+#The outcome vectors should positionally align with the baseline covariates 
+s19_outcomes <- c("ppvt_s19_rawscore",
+              "lwid_s19_rawscore",
+              "wap_s19_rawscore",
+              "rema_s19_tscore_allitems")
+
+s18_outcomes <- c("ppvt_s18_rawscore",
+                  "dbls_s18_lnf_score",
+                  "wap_s18_rawscore",
+                  "rema_s18_tscore_allitems")
+
+s17_outcomes <- c("ppvt_s17_rawscore",
+                  # "DIBELS", 
+                  "wap_s17_rawscore",
+                  "rema_s17_tscore_allitems")
+
+f16_vars <- c("ppvt_f16_rawscore",
+             "ppvt_f16_rawscore", #use as proxy for base LWID
+             "wap_f16_rawscore",
+             "wap_f16_rawscore") #use as proxy for base REMA
+
+f17_vars <- c("ppvt_f17_rawscore",
+             "dbls_f17_lnf_score", 
+             "wap_f17_rawscore",
+             "rema_f17_tscore_allitems")
+
+lp_class_vars <- c("lp_high_aligned",
+                   "lp_mixed_alignment") #omit low quality as reference group
+
+med_class_vars <- c("med_high_aligned",
+                    "med_mixed_alignment") #omit low quality as reference group
+
+student_covs <- c("child_age_s19_imp", #imputed at Nov 1 for those who weren't assessed
+                  "bl_lunch", 
+                  "bl_females", 
+                  "bl_zpoth", 
+                  "bl_raceasian", 
+                  "bl_raceblack", 
+                  "bl_racehisp", 
+                  "bl_raceother")
+
+parent_covs <- c("ps_y1y2y3_mothage",
+                "ps_y1y2y3_hhsize",
+                "ps_y1y2y3_adultwork",
+                "ps_y1y2y3_married",
+                "ps_y1y2y3_parentage",
+                # "ps_y1y2y3_parented_lths", reference
+                "ps_y1y2y3_parented_2yrdeg",
+                "ps_y1y2y3_parented_ba",
+                "ps_y1y2y3_parented_graddeg")
+
+```
+
+###Additional Processing
+We need to create some additional variables and do some more cleaning
+
+```{r create some measures before centering}
+#Year 1
+classroom_y1 <- read_sas("/data/share/fnc/excelp3/secure/data/sas/classroommaster_y1.sas7bdat")%>%
+  select(ClassIDAnlys_Y1,FD_Y1_OBSDATE_V1,FD_Y1_OBSDATE_V2)%>%
+  mutate(Visit1_days = as.numeric(difftime(FD_Y1_OBSDATE_V1,"2016-09-01")),
+         Visit2_days = as.numeric(difftime(FD_Y1_OBSDATE_V2,"2016-09-01")))%>%
+  rowwise()%>%mutate(y1_Sep1_FD = mean(c(Visit1_days,Visit2_days),na.rm=TRUE))
+
+classroom_y1%>%group_by(Visit1_days,FD_Y1_OBSDATE_V1)%>%tally()
+classroom_y1%>%group_by(Visit2_days,FD_Y1_OBSDATE_V2)%>%tally()
+classroom_y1%>%group_by(y1_Sep1_FD,Visit1_days,Visit2_days)%>%tally()
+
+#Year 2
+classroom_y2 <- read_sas("/data/share/fnc/excelp3/secure/data/sas/fd_y2_step1.sas7bdat")%>%
+  select(Classroom_ID,EndDate)%>%
+  mutate(days = as.numeric(difftime(EndDate,"2017-09-01")))
+
+classroom_y2%>%group_by(days,EndDate)%>%tally()
+
+classroom_y2_collapse <- classroom_y2%>%
+  group_by(Classroom_ID)%>%
+  summarise(y2_Sep1_FD = mean(days,na.rm=TRUE))
+
+classroom_y2%>%group_by(Classroom_ID,days)%>%tally()
+classroom_y2_collapse%>%group_by(Classroom_ID,y2_Sep1_FD)%>%tally()
+
+#Year 3
+classroom_y3 <- read_sas("/data/share/fnc/excelp3/secure/data/sas/fd_y3_rawstep.sas7bdat")%>%
+  select(ClassroomID,ObsDate)%>%
+  mutate(days = as.numeric(difftime(ObsDate,"2018-09-01")))
+
+classroom_y3%>%group_by(days,ObsDate)%>%tally()
+
+classroom_y3_collapse <- classroom_y3%>%
+  group_by(ClassroomID)%>%
+  summarise(y3_Sep1_FD = mean(days,na.rm=TRUE))
+
+classroom_y3%>%group_by(ClassroomID,days)%>%tally()
+classroom_y3_collapse%>%group_by(ClassroomID,y3_Sep1_FD)%>%tally()
+
+#Merge it all together
+master_cl <- master%>%
+  left_join(classroom_y1, by = c("classidanlys_y1" = "ClassIDAnlys_Y1"))%>%
+  left_join(classroom_y2_collapse, by = c("classidanlys_y2" = "Classroom_ID"))%>%
+  left_join(classroom_y3_collapse, by = c("classidanlys_y3" = "ClassroomID"))%>%
+  select(-c(FD_Y1_OBSDATE_V1,FD_Y1_OBSDATE_V2,Visit1_days,Visit2_days))
+#great, three new variables added and same number of rows
+
+summary(master_cl$y1_Sep1_FD)
+summary(master_cl$y2_Sep1_FD)
+summary(master_cl$y3_Sep1_FD)
+
+master_cl%>%group_by(y1_Sep1_FD)%>%tally()
+master_cl%>%group_by(y2_Sep1_FD)%>%tally()
+master_cl%>%group_by(y3_Sep1_FD)%>%tally()
+
+sum(!is.na(master_cl$y1_Sep1_FD))
+sum(!is.na(master_cl$y2_Sep1_FD))
+sum(!is.na(master_cl$y3_Sep1_FD))
+
+```
+
+```{r CLASS covariate creation}
+master_CLASScovs <- master_cl%>%
+  rowwise()%>%mutate(cls_y2y3_classroom_org = mean(c(cls_y2_classroom_org,cls_y3_classroom_org),na.rm=TRUE),
+                     cls_y2y3_em_support = mean(c(cls_y2_em_support,cls_y3_em_support),na.rm=TRUE),
+                     cls_y2y3_instruct_support = mean(c(cls_y2_instruct_support,cls_y3_instruct_support),na.rm=TRUE))%>%
+  ungroup()
+
+master_CLASScovs%>%group_by(cls_y2y3_classroom_org,cls_y2_classroom_org,cls_y3_classroom_org)%>%tally()
+master_CLASScovs%>%group_by(cls_y2y3_em_support,cls_y2_em_support,cls_y3_em_support)%>%tally()
+master_CLASScovs%>%group_by(cls_y2y3_instruct_support,cls_y2_instruct_support,cls_y3_instruct_support)%>%tally()
+
+
+```
+
+
+```{r centering continuous variables}
+
+center_vars <- c(
+              #fidelity variables
+                "fd_y1_adh_avg",
+                "fd_y1_qual_avg",
+                "fd_y2_adh_avg",
+                "fd_y2_qual_avg",
+                "fd_y3_adh_avg",
+                "fd_y3_qual_avg",
+              #fidelity component variables
+                "fd_y1_ic_adhavg",
+                "fd_y1_ic_qualavg",
+                "fd_y1_ctr_adhavg",
+                "fd_y1_ctr_qualavg",
+                "fd_y1_sgll_adhavg",
+                "fd_y1_sgll_qualavg",
+                "fd_y1_swpl_adhavg",
+                "fd_y1_swpl_qualavg",
+                "fd_y1_ra_adhavg",
+                "fd_y1_ra_qualavg",
+                "fd_y2_ic_adhavg",
+                "fd_y2_ic_qualavg",
+                "fd_y2_ctr_adhavg",
+                "fd_y2_ctr_qualavg",
+                "fd_y2_sgll_adhavg",
+                "fd_y2_sgll_qualavg",
+                "fd_y2_swpl_adhavg",
+                "fd_y2_swpl_qualavg",
+                "fd_y2_ra_adhavg",
+                "fd_y2_ra_qualavg",
+                "fd_y3_stud_adhavg",
+                "fd_y3_stud_qualavg",
+                "fd_y3_sgll_adhavg",
+                "fd_y3_sgll_qualavg",
+                "fd_y3_ph_adhavg",
+                "fd_y3_ph_qualavg",
+                "fd_y3_ra_adhavg",
+                "fd_y3_ra_qualavg",
+              #days between september 1st and fidelity observation
+                "y1_Sep1_FD",
+                "y2_Sep1_FD",
+                "y3_Sep1_FD",
+              #continuous covariates
+                "child_age_s19_imp",
+                "ps_y1y2y3_mothage",
+                "ps_y1y2y3_hhsize",
+                "cls_y1_classroom_org",
+                "cls_y1_em_support",
+                "cls_y1_instruct_support",
+                "cls_y2_classroom_org",
+                "cls_y2_em_support",
+                "cls_y2_instruct_support",
+                "cls_y3_classroom_org",
+                "cls_y3_em_support",
+                "cls_y3_instruct_support",
+                "cls_y2y3_classroom_org",
+                "cls_y2y3_em_support",
+                "cls_y2y3_instruct_support",
+                "y1_testdatediff",
+                "y2_testdatediff",
+                "y2_y3_testdatediff", 
+              #additional fidelity covariates
+                "fd_y1_uniq_cpts_obs_pct",
+                "fd_y2_uniq_cpts_obs_pct",
+                "fd_y3_uniq_cpts_obs_pct",
+                "fd_y1_obs_sumduravg",
+                "fd_y2_obs_sumduravg",
+                "fd_y3_obs_sumduravg",
+              #s19 
+                "ppvt_s19_rawscore",
+                "lwid_s19_rawscore",
+                "wap_s19_rawscore",
+                "rema_s19_tscore_allitems",
+              #s18
+                "ppvt_s18_rawscore",
+                "dbls_s18_lnf_score",
+                "wap_s18_rawscore",
+                "rema_s18_tscore_allitems",
+              #s17
+                "ppvt_s17_rawscore",
+                "wap_s17_rawscore",
+                "rema_s17_tscore_allitems",
+              #f17
+                "ppvt_f17_rawscore",
+                "dbls_f17_lnf_score", 
+                "wap_f17_rawscore",
+                "rema_f17_tscore_allitems",
+              #f16
+                "ppvt_f16_rawscore",
+                # "ppvt_f16_rawscore", #commenting out duplicates
+                # "wap_f16_rawscore",
+                "wap_f16_rawscore")
+
+centered <- master_CLASScovs%>%
+  mutate(across(.cols = all_of(center_vars), .fns = ~scale(.x,scale = FALSE), .names = "{.col}_cent"),
+         bl_raceblackhisp = ifelse(bl_raceblack==1|bl_racehisp==1,1,0))
+
+centered%>%group_by(bl_raceblackhisp,bl_raceblack,bl_racehisp)%>%tally()
+# options(max.print = 5000)
+# names(centered)
+
+#spot checking the centering
+summary(centered$fd_y1_qual_avg)
+summary(centered$fd_y1_qual_avg_cent)
+
+summary(centered$ppvt_f16_rawscore)
+summary(centered$ppvt_f16_rawscore_cent)
+
+summary(centered$cls_y1_classroom_org)
+summary(centered$cls_y1_classroom_org_cent)
+
+summary(centered$cls_y2_instruct_support)
+summary(centered$cls_y2_instruct_support_cent)
+#Great, the new variables are equal to the mean subtracted from the old value
+
+```
+
+```{r create new variable lists}
+#Now let's create new covariate objects that use centered variables for continuous variables
+names(select(master,contains("age")))
+
+student_covs_cent <- c("child_age_s19_imp_cent", 
+                      "bl_lunch", 
+                      "bl_females", 
+                      "bl_zpoth", 
+                      "bl_raceasian", 
+                      "bl_raceblack", 
+                      "bl_racehisp", 
+                      "bl_raceother")
+
+parent_covs_cent <- c("ps_y1y2y3_mothage_cent",
+                      "ps_y1y2y3_hhsize_cent",
+                      "ps_y1y2y3_adultwork",
+                      "ps_y1y2y3_married",
+                      "ps_y1y2y3_parentage",
+                      # "ps_y1y2y3_parented_lths", reference
+                      "ps_y1y2y3_parented_2yrdeg",
+                      "ps_y1y2y3_parented_ba",
+                      "ps_y1y2y3_parented_graddeg")
+
+#The outcome vectors should positionally align with the baseline covariates 
+s19_outcomes_cent <- c("ppvt_s19_rawscore_cent",
+              "lwid_s19_rawscore_cent",
+              "wap_s19_rawscore_cent",
+              "rema_s19_tscore_allitems_cent")
+
+s18_outcomes_cent <- c("ppvt_s18_rawscore_cent",
+                  "dbls_s18_lnf_score_cent",
+                  "wap_s18_rawscore_cent",
+                  "rema_s18_tscore_allitems_cent")
+
+s17_outcomes_cent <- c("ppvt_s17_rawscore_cent",
+                  # "DIBELS",
+                  "wap_s17_rawscore_cent",
+                  "rema_s17_tscore_allitems_cent")
+
+f16_vars_cent <- c("ppvt_f16_rawscore_cent",
+             "ppvt_f16_rawscore_cent", #use as proxy for base LWID
+             "wap_f16_rawscore_cent",
+             "wap_f16_rawscore_cent") #use as proxy for base REMA
+
+f17_vars_cent <- c("ppvt_f17_rawscore_cent",
+             "dbls_f17_lnf_score_cent", 
+             "wap_f17_rawscore_cent",
+             "rema_f17_tscore_allitems_cent")
+
+```
+
+These covariates follow the covariate set that Sam used in her analysis
+```{r standard covariate lists}
+
+covs_cent_std <- c("child_age_s19_imp_cent",
+                  "bl_lunch", 
+                  "bl_females", 
+                  "bl_zpoth", 
+                  "bl_raceasian", 
+                  "bl_raceblack", 
+                  "bl_racehisp", 
+                  "bl_raceother")
+
+y1_std_covs <- c(# "child_age_f16_cent", NEED TO CENTER
+                 "y1_testdatediff_cent",
+                 "y1_Sep1_FD_cent",
+                 "cls_y1_classroom_org_cent",
+                 "cls_y1_em_support_cent",
+                 "cls_y1_instruct_support_cent",
+                 "fd_y1_adh_avg_cent",
+                 "fd_y1_qual_avg_cent",
+                 "fd_y1_uniq_cpts_obs_pct_cent",
+                 "fd_y1_obs_sumduravg_cent"
+  )
+
+y1_std_covs_nofid <- y1_std_covs[-c(6,7)]
+
+y2_std_covs <- c(# "child_age_f17_cent", NEED TO CENTER
+                 "y2_testdatediff_cent",
+                 "y2_Sep1_FD_cent",
+                 "cls_y2_classroom_org_cent",
+                 "cls_y2_em_support_cent",
+                 "cls_y2_instruct_support_cent",
+                 "fd_y2_adh_avg_cent",
+                 "fd_y2_qual_avg_cent",
+                 "fd_y2_uniq_cpts_obs_pct_cent",
+                 "fd_y2_obs_sumduravg_cent"
+  )
+
+y2_std_covs_nofid <- y2_std_covs[-c(6,7)]
+
+y3_std_covs <- c(# "child_age_s18_cent", NEED TO CENTER
+                 "y2_y3_testdatediff_cent",
+                 "y3_Sep1_FD_cent",
+                 "cls_y3_classroom_org_cent",
+                 "cls_y3_em_support_cent",
+                 "cls_y3_instruct_support_cent",
+                 "fd_y3_adh_avg_cent",
+                 "fd_y3_qual_avg_cent",
+                 "fd_y3_uniq_cpts_obs_pct_cent",
+                 "fd_y3_obs_sumduravg_cent"
+    )
+
+y3_std_covs_nofid <- y3_std_covs[-c(6,7)]
+
+
+```
+
+# Create Median Splits for MS4Class Analysis
+```{r creating median split profiles}
+stu_fid <- centered%>%
+  mutate(fd_y1 = if_else(!is.na(fd_y1_obs_sumduravg),1,0),
+         fd_y2 = if_else(!is.na(fd_y2_obs_sumduravg),1,0),
+         fd_y3 = if_else(!is.na(fd_y3_obs_sumduravg),1,0),
+         rema_s19_flag = if_else(!is.na(rema_s19_raw_score_totalavg),1,0),
+         stu_fid_samp = if_else(fd_y1==1 &((fd_y2 == 1|fd_y3 == 1))
+                                ,1,0))
+
+medians<-stu_fid%>%
+  filter(stu_fid_samp == 1)%>% #subset to fidelity sample
+  rowwise()%>%mutate(fd_y1_avg = mean(c(fd_y1_extbavg,fd_y1_summdisavg,fd_y1_vocabavg),na.rm = TRUE),
+                 fd_y2_avg = mean(c(fd_y2_extbavg,fd_y2_summdisavg,fd_y2_vocabavg),na.rm = TRUE),
+                 fd_y3_avg = mean(c(fd_y3_extb_avg,fd_y3_summdis_avg,fd_y3_vocab_avg),na.rm = TRUE))%>%
+  ungroup()%>%
+  mutate(across(.cols = c(fd_y1_avg,fd_y2_avg,fd_y3_avg),
+                                  .fns = ~ median(.x,na.rm = TRUE),
+                                  .names = "{col}_median"))
+  
+medians%>%group_by(fd_y1_avg,fd_y1_extbavg,fd_y1_summdisavg,fd_y1_vocabavg)%>%tally()
+medians%>%group_by(fd_y2_avg,fd_y2_extbavg,fd_y2_summdisavg,fd_y2_vocabavg)%>%tally()
+medians%>%group_by(fd_y3_avg,fd_y3_extb_avg,fd_y3_summdis_avg,fd_y3_vocab_avg)%>%tally()
+
+mean(medians$fd_y1_avg)
+mean(medians$fd_y2_avg)
+mean(medians$fd_y3_avg)
+
+create_median_split <- function(varX,medX) {
+  case_when(is.na(varX) ~ NA_real_,
+            varX >= medX ~ 1,
+            varX < medX ~ 0)
+}
+
+median_splits <- medians%>%
+  mutate(fd_y1_ge_med = create_median_split(fd_y1_avg,fd_y1_avg_median),
+         fd_y2_ge_med = create_median_split(fd_y2_avg,fd_y2_avg_median),
+         fd_y3_ge_med = create_median_split(fd_y3_avg,fd_y3_avg_median))%>%
+  rowwise()%>%mutate(fd_med_avg = mean(c(fd_y1_ge_med,fd_y2_ge_med,fd_y3_ge_med),na.rm=TRUE))%>%
+  ungroup()%>%
+  mutate(ms4_class = case_when(fd_med_avg == 1 ~ "high high",
+                               fd_med_avg == 0 ~ "low low",
+                               fd_y1_ge_med == 1 ~ "high mixed",
+                               fd_y1_ge_med == 0 ~ "low mixed"),
+         ms4_class_hh = if_else(ms4_class == "high high",1,0),
+         ms4_class_ll = if_else(ms4_class == "low low",1,0),
+         ms4_class_hm = if_else(ms4_class == "high mixed",1,0),
+         ms4_class_lm = if_else(ms4_class == "low mixed",1,0))
+
+#checking the median split dummies
+median_splits%>%group_by(fd_y1_ge_med,fd_y1_avg,fd_y1_avg_median)%>%tally()
+median_splits%>%group_by(fd_y2_ge_med,fd_y2_avg,fd_y2_avg_median)%>%tally()
+median_splits%>%group_by(fd_y3_ge_med,fd_y3_avg,fd_y3_avg_median)%>%tally()
+#3 year average 
+median_splits%>%group_by(ms4_class,fd_med_avg,fd_y1_ge_med,fd_y2_ge_med,fd_y3_ge_med)%>%tally()
+median_splits%>%group_by(ms4_class,ms4_class_hh,ms4_class_hm,ms4_class_lm,ms4_class_ll)%>%tally()
+median_splits%>%group_by(ms4_class)%>%tally()
+
+```
+
+```{r defining MS4Class Variables}
+
+ms4_class_vars <- c("ms4_class_hh","ms4_class_hm","ms4_class_lm") #omitting low low group
+
+```
+
+# Creating Median Splits for non-attender classes
+With guidance from Mira and Meghan, we decided that we need to subset the sample to IES only to match samples from other analyses.
+```{r non attender processing}
+with_nonatts <- centered%>%
+  mutate(fd_y1 = if_else(!is.na(fd_y1_obs_sumduravg),1,0),
+         fd_y2 = if_else(!is.na(fd_y2_obs_sumduravg),1,0),
+         fd_y3 = if_else(!is.na(fd_y3_obs_sumduravg),1,0),
+         samp_w_nonatts = if_else((fd_y1==1 &((fd_y2 == 1|fd_y3 == 1)))|prekattender_public==0,1,0))
+
+with_nonatts%>%group_by(prekattender_public)%>%tally()
+with_nonatts%>%group_by(ies,samp_w_nonatts,prekattender_public,peg,fd_y1,fd_y2,fd_y3)%>%tally()
+
+w_nonatts_medians<-with_nonatts%>%
+  filter(ies==1 & samp_w_nonatts == 1)%>% #subset to fidelity sample IES ONLY
+  rowwise()%>%mutate(fd_y1_avg = mean(c(fd_y1_extbavg,fd_y1_summdisavg,fd_y1_vocabavg),na.rm = TRUE),
+                 fd_y2_avg = mean(c(fd_y2_extbavg,fd_y2_summdisavg,fd_y2_vocabavg),na.rm = TRUE),
+                 fd_y3_avg = mean(c(fd_y3_extb_avg,fd_y3_summdis_avg,fd_y3_vocab_avg),na.rm = TRUE))%>%
+  ungroup()%>%
+  mutate(across(.cols = c(fd_y1_avg,fd_y2_avg,fd_y3_avg),
+                                  .fns = ~ median(.x,na.rm = TRUE),
+                                  .names = "{col}_median"))
+  
+w_nonatts_medians%>%group_by(fd_y1_avg,fd_y1_extbavg,fd_y1_summdisavg,fd_y1_vocabavg)%>%tally()
+w_nonatts_medians%>%group_by(fd_y2_avg,fd_y2_extbavg,fd_y2_summdisavg,fd_y2_vocabavg)%>%tally()
+w_nonatts_medians%>%group_by(fd_y3_avg,fd_y3_extb_avg,fd_y3_summdis_avg,fd_y3_vocab_avg)%>%tally()
+
+mean(w_nonatts_medians$fd_y1_avg)
+mean(w_nonatts_medians$fd_y2_avg)
+mean(w_nonatts_medians$fd_y3_avg)
+
+create_median_split <- function(varX,medX) {
+  case_when(is.na(varX) ~ NA_real_,
+            varX >= medX ~ 1,
+            varX < medX ~ 0)
+}
+
+w_nonatts_median_splits <- w_nonatts_medians%>%
+  mutate(fd_y1_ge_med = create_median_split(fd_y1_avg,fd_y1_avg_median),
+         fd_y2_ge_med = create_median_split(fd_y2_avg,fd_y2_avg_median),
+         fd_y3_ge_med = create_median_split(fd_y3_avg,fd_y3_avg_median),
+         school_id_y2 = as.factor(school_id_y2),
+         school_id_y3 = as.factor(school_id_y3))%>%
+  rowwise()%>%mutate(fd_med_avg = mean(c(fd_y1_ge_med,fd_y2_ge_med,fd_y3_ge_med),na.rm=TRUE))%>%
+  ungroup()%>%
+  mutate(ms_class = case_when(prekattender_public==0 ~ "non attender",
+                               fd_med_avg == 1 ~ "high high",
+                               fd_med_avg == 0 ~ "low low",
+                               fd_y1_ge_med == 1 ~ "high mixed",
+                               fd_y1_ge_med == 0 ~ "low mixed"),
+         ms_class_hh = if_else(ms_class == "high high",1,0),
+         ms_class_ll = if_else(ms_class == "low low",1,0),
+         ms_class_hm = if_else(ms_class == "high mixed",1,0),
+         ms_class_lm = if_else(ms_class == "low mixed",1,0)) #no need to create a dummy for the non attenders
+
+w_nonatts_median_splits%>%group_by(ms_class,prekattender_public,fd_med_avg,fd_y1_ge_med)%>%tally()
+w_nonatts_median_splits%>%group_by(ms_class)%>%tally()
+
+#checking the median split dummies
+w_nonatts_median_splits%>%group_by(fd_y1_ge_med,fd_y1_avg,fd_y1_avg_median)%>%tally()
+w_nonatts_median_splits%>%group_by(fd_y2_ge_med,fd_y2_avg,fd_y2_avg_median)%>%tally()
+w_nonatts_median_splits%>%group_by(fd_y3_ge_med,fd_y3_avg,fd_y3_avg_median)%>%tally()
+#3 year average 
+w_nonatts_median_splits%>%group_by(ms_class,prekattender_public,fd_med_avg,fd_y1_ge_med,fd_y2_ge_med,fd_y3_ge_med)%>%tally()
+w_nonatts_median_splits%>%group_by(ms_class,ms_class_hh,ms_class_hm,ms_class_lm,ms_class_ll)%>%tally()
+
+
+#checking factor conversion
+glimpse(w_nonatts_median_splits%>%select(starts_with("school_id_")))
+```
+
+# Writing the Functions
+```{r non functionalized extract}
+#create helper function to create formula from model variables
+create_formula <- function(lhs, rhs){
+  fm <- as.formula(paste(lhs, paste(rhs, collapse = " + "), sep = "~"))
+  return(fm)
+}
+
+#create model formula
+model_formula <- create_formula("ppvt_s19_rawscore",
+                                c(
+                                  "ppvt_f16_rawscore"
+                                  # ,lp_class_vars
+                                  # ,student_covs
+                                  # ,parent_covs
+                                  ,"(1|school_id_y1_y2)"
+                                  ))
+model_formula
+
+#run mixed model
+model.result <- lmerTest::lmer(model_formula, data=master)
+
+summary(model.result)
+
+#clean model results
+tidy.result <- broom.mixed::tidy(model.result)%>%
+  mutate(stars = case_when(p.value < .001 ~ "***",
+                           p.value < .01 ~ "**",
+                           p.value < .05 ~ "*",
+                           p.value < .1 ~ "\u2020", #unicode for dagger
+                           TRUE ~ " "))%>% #helps with vlookups if these are blanks instead of missings
+  relocate(term, effect, group)
+
+#add additional statistics
+#1)
+nobs <- data.frame("n",nobs(model.result))
+  names(nobs)[[1]] <- "term"
+  names(nobs)[[2]] <- "estimate"
+
+#2)
+formula_text <- data.frame(paste(as.character(model_formula[2]), #as.character puts the '~' 2nd so I'm just reordering the output here
+                                         as.character(model_formula[1]),
+                                         as.character(model_formula[3]))) 
+names(formula_text)[[1]] <- "term"
+
+#3)
+fit_stats <-glance(model.result)%>%
+  pivot_longer(cols = everything(),
+               names_to = "term",
+               values_to = "estimate")
+
+extract_test <- tidy.result%>%
+  bind_rows(nobs)%>%
+  bind_rows(formula_text)%>%
+  bind_rows(fit_stats)
+
+```
+
+```{r Create function}
+mixed_extract <- function(outcomeX, # the outcome (quoted)
+                          BLcovX, # the BL covariate (quoted)
+                          OTHcovsX,# a vector of covariates to be included in the model
+                          dfX = f) #default is the analytic_df, but you can change it if need be)
+  {
+#1) write formula
+model_formula <- create_formula(outcomeX,
+                              c(BLcovX,OTHcovsX))
+
+#2) run and tidy model
+model.result <- lmerTest::lmer(model_formula, data=dfX)
+
+tidy.result <- broom.mixed::tidy(model.result)%>%
+  mutate(stars = case_when(p.value < .001 ~ "***",
+                           p.value < .01 ~ "**",
+                           p.value < .05 ~ "*",
+                           p.value < .1 ~ "\u2020", #unicode for dagger
+                           TRUE ~ " "))%>% #helps with vlookups if these are blanks instead of missings
+  relocate(term, effect, group)
+
+#3) Grab other output from results
+nobs <- data.frame("n",nobs(model.result))
+  names(nobs)[[1]] <- "term"
+  names(nobs)[[2]] <- "estimate"
+
+formula_text <- data.frame(paste(as.character(model_formula[2]), #as.character puts the '~' 2nd so I'm just reordering the output here
+                                         as.character(model_formula[1]),
+                                         as.character(model_formula[3]))) 
+names(formula_text)[[1]] <- "term"
+
+fit_stats <-glance(model.result)%>%
+  pivot_longer(cols = everything(),
+               names_to = "term",
+               values_to = "estimate")
+
+#4) Bind it all together
+extract <- tidy.result%>%
+  bind_rows(nobs)%>%
+  bind_rows(formula_text)%>%
+  bind_rows(fit_stats)
+
+# extract[nrow(extract) + 1,]$term = paste(as.character(model_formula[2]),
+#                                          as.character(model_formula[1]),
+#                                          as.character(model_formula[3])) #converting the formula to character puts the ~ 2nd so I'm just reordering the output here
+return(extract)
+}
+
+#Sample Call
+main_ppvt<-mixed_extract("ppvt_s19_rawscore",
+                         "ppvt_f16_rawscore",
+                         c("(1|school_id_y1_y2)"),
+                         dfX = master)
+
+```
+
+```{r mixed export function}
+#Let's bake the extract creation into a function
+mixed_export <- function(OTHcovsY,
+                         outcomesY,
+                         bl_varsY,
+                         filenameY,
+                         dfY = analytic_df) { #set the default dataframe to use 
+  main_BLonly_extract<-map2(.x = outcomesY, #.x represents outcomeX
+              .y = bl_varsY, #.y represents BLcovX
+              .f = mixed_extract,
+              OTHcovsX = OTHcovsY,
+              dfX = dfY)
+
+names(main_BLonly_extract) <- outcomesY
+
+writexl::write_xlsx(x = main_BLonly_extract, path = paste0("/data/share/fnc/excelp3/Secure/Analysis/Fidelity analysis/Y1 through Y3/output/predicting gains/",filenameY,".xlsx"))
+
+}
+
+#Sample Call
+# mixed_export(OTHcovsY = c("(1|school_id_y1_y2)"),
+#              outcomesY = s19_outcomes,
+#              bl_varsY = f16_vars,
+#              filenameY = "test",
+#              dfY = master)
+
+
+```
+
+#Create Extracts
+## Main Model
+```{r main model}
+
+mixed_export(OTHcovsY = c(lp_class_vars,"(1|school_id_y1_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Main Analysis (BL only)")
+
+mixed_export(OTHcovsY = c(lp_class_vars,student_covs,"(1|school_id_y1_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Main Analysis (BL + student chars)")
+
+mixed_export(OTHcovsY = c(lp_class_vars,student_covs,parent_covs,"(1|school_id_y1_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Main Analysis (full model)")
+
+```
+
+## Group by PreK School
+```{r group by prek school}
+
+mixed_export(OTHcovsY = c(lp_class_vars,"(1|school_id_y1)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Group by Prek School (BL only)")
+
+mixed_export(OTHcovsY = c(lp_class_vars,student_covs,"(1|school_id_y1)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Group by Prek School (BL + student chars)")
+
+mixed_export(OTHcovsY = c(lp_class_vars,student_covs,parent_covs,"(1|school_id_y1)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Group by Prek School (full model)")
+
+```
+
+## Group by K Schools
+```{r group by K school}
+
+mixed_export(OTHcovsY = c(lp_class_vars,"(1|school_id_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Group by K School (BL only)")
+
+mixed_export(OTHcovsY = c(lp_class_vars,student_covs,"(1|school_id_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Group by K School (BL + student chars)")
+
+mixed_export(OTHcovsY = c(lp_class_vars,student_covs,parent_covs,"(1|school_id_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Group by K School (full model)")
+
+```
+
+## K Spring Outcomes
+```{r K spring outcomes}
+s18_outcomes
+f16_vars
+
+mixed_export(OTHcovsY = c(lp_class_vars,"(1|school_id_y1_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "K Spring Outcomes (BL only)")
+
+mixed_export(OTHcovsY = c(lp_class_vars,student_covs,"(1|school_id_y1_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "K Spring Outcomes (BL + student chars)")
+
+mixed_export(OTHcovsY = c(lp_class_vars,student_covs,parent_covs,"(1|school_id_y1_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "K Spring Outcomes (full model)")
+
+```
+
+##Median Based Classes
+```{r median based class main analysis}
+
+mixed_export(OTHcovsY = c(med_class_vars,"(1|school_id_y1_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Median Based Classes (BL only)")
+
+mixed_export(OTHcovsY = c(med_class_vars,student_covs,"(1|school_id_y1_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Median Based Classes (BL + student chars)")
+
+mixed_export(OTHcovsY = c(med_class_vars,student_covs,parent_covs,"(1|school_id_y1_y2)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = f16_vars,
+             filenameY = "Median Based Classes (full model)")
+
+```
+
+##Within Year (Non-centered variables)
+```{r year 1}
+s17_outcomes
+f16_vars
+
+f16_3vars <- c("ppvt_f16_rawscore","wap_f16_rawscore","wap_f16_rawscore") #because we don't have a lwid/dibels at s17, we need a baseline covariate vector with 3 corresponding measures
+f16_3vars
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg", "fd_y1_qual_avg", "(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes,
+             bl_varsY = f16_3vars,
+             filenameY = "Y1 Fidelity Predictors (BL only)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg", "fd_y1_qual_avg", student_covs,"(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes,
+             bl_varsY = f16_3vars,
+             filenameY = "Y1 Fidelity Predictors (BL + student chars)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg", "fd_y1_qual_avg", student_covs,parent_covs,"(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes,
+             bl_varsY = f16_3vars,
+             filenameY = "Y1 Fidelity Predictors (full model)",
+             dfY = master)
+
+```
+
+```{r year 2}
+s18_outcomes
+f17_vars
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg", "fd_y2_qual_avg", "(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f17_vars,
+             filenameY = "Y2 Fidelity Predictors (BL only)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg", "fd_y2_qual_avg", student_covs, "(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f17_vars,
+             filenameY = "Y2 Fidelity Predictors (BL + student chars)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg", "fd_y2_qual_avg", student_covs,parent_covs,"(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f17_vars,
+             filenameY = "Y2 Fidelity Predictors (full model)",
+             dfY = master)
+
+```
+
+```{r year 3}
+s19_outcomes
+s18_outcomes
+
+s18_bl <- c("ppvt_s18_rawscore","ppvt_s18_rawscore","wap_s18_rawscore","rema_s18_tscore_allitems") #switching in ppvt for dbls as a baseline covariate for lwid
+s18_bl
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg", "fd_y3_qual_avg", "(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = s18_bl,
+             filenameY = "Y3 Fidelity Predictors (BL only)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg", "fd_y3_qual_avg", student_covs,"(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = s18_bl,
+             filenameY = "Y3 Fidelity Predictors (BL + student chars)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg", "fd_y3_qual_avg", student_covs,parent_covs,"(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = s18_bl,
+             filenameY = "Y3 Fidelity Predictors (full model)",
+             dfY = master)
+
+```
+
+### Within Year BL x Fidelity Interaction
+```{r year 1}
+s17_outcomes
+f16_vars #need a 3 dimension object to match the number of outcomes we have
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+f16_3vars_fidint <- list(c("ppvt_f16_rawscore","ppvt_f16_rawscore : fd_y1_adh_avg", "ppvt_f16_rawscore : fd_y1_qual_avg"),
+                      c("wap_f16_rawscore","wap_f16_rawscore : fd_y1_adh_avg", "wap_f16_rawscore : fd_y1_qual_avg"),
+                      c("wap_f16_rawscore","wap_f16_rawscore : fd_y1_adh_avg", "wap_f16_rawscore : fd_y1_qual_avg"))
+
+f16_3vars_fidint
+
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg", "fd_y1_qual_avg", "(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes,
+             bl_varsY = f16_3vars_fidint,
+             filenameY = "BLxFid Int/Y1 BLxFid Int (BL only)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg", "fd_y1_qual_avg", student_covs,"(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes,
+             bl_varsY = f16_3vars_fidint,
+             filenameY = "BLxFid Int/Y1 BLxFid Int (BL + student chars)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg", "fd_y1_qual_avg", student_covs,parent_covs,"(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes,
+             bl_varsY = f16_3vars_fidint,
+             filenameY = "BLxFid Int/Y1 BLxFid Int (full model)",
+             dfY = master)
+
+```
+
+```{r year 2}
+s18_outcomes
+f17_vars
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+f17_fidint <- list(c("ppvt_f17_rawscore",       "ppvt_f17_rawscore : fd_y2_adh_avg",        "ppvt_f17_rawscore : fd_y2_qual_avg"),
+                c("dbls_f17_lnf_score",      "dbls_f17_lnf_score : fd_y2_adh_avg",       "dbls_f17_lnf_score : fd_y2_qual_avg"),
+                c("wap_f17_rawscore",        "wap_f17_rawscore : fd_y2_adh_avg",         "wap_f17_rawscore : fd_y2_qual_avg"),
+                c("rema_f17_tscore_allitems","rema_f17_tscore_allitems : fd_y2_adh_avg", "rema_f17_tscore_allitems : fd_y2_qual_avg"))
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg", "fd_y2_qual_avg", "(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f17_fidint,
+             filenameY = "BLxFid Int/Y2 BLxFid Int (BL only)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg", "fd_y2_qual_avg", student_covs, "(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f17_fidint,
+             filenameY = "BLxFid Int/Y2 BLxFid Int (BL + student chars)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg", "fd_y2_qual_avg", student_covs,parent_covs,"(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f17_fidint,
+             filenameY = "BLxFid Int/Y2 BLxFid Int (full model)",
+             dfY = master)
+
+```
+
+```{r year 3}
+s19_outcomes
+s18_outcomes
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+s18_fidint <- list( c("ppvt_s18_rawscore",       "ppvt_s18_rawscore : fd_y3_adh_avg",        "ppvt_s18_rawscore : fd_y3_qual_avg"),
+                    c("dbls_s18_lnf_score",      "dbls_s18_lnf_score : fd_y3_adh_avg",       "dbls_s18_lnf_score : fd_y3_qual_avg"),
+                    c("wap_s18_rawscore",        "wap_s18_rawscore : fd_y3_adh_avg",         "wap_s18_rawscore : fd_y3_qual_avg"),
+                    c("rema_s18_tscore_allitems","rema_s18_tscore_allitems : fd_y3_adh_avg", "rema_s18_tscore_allitems : fd_y3_qual_avg"))
+s18_fidint
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg", "fd_y3_qual_avg", "(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = s18_fidint,
+             filenameY = "BLxFid Int/Y3 BLxFid Int (BL only)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg", "fd_y3_qual_avg", student_covs, "(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = s18_fidint,
+             filenameY = "BLxFid Int/Y3 BLxFid Int (BL + student chars)",
+             dfY = master)
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg", "fd_y3_qual_avg", student_covs,parent_covs,"(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = s18_fidint,
+             filenameY = "BLxFid Int/Y3 BLxFid Int (full model)",
+             dfY = master)
+
+```
+
+```{r correlations}
+
+cor(master$fd_y1_adh_avg,master$fd_y1_qual_avg,use = "complete.obs")
+cor(master$fd_y2_adh_avg,master$fd_y2_qual_avg,use = "complete.obs")
+cor(master$fd_y3_adh_avg,master$fd_y3_qual_avg,use = "complete.obs")
+
+
+```
+
+## Centering Variables
+(All analyses after this should use centered variables)
+
+### Within Year BL x Fidelity Interaction (Centered)
+
+```{r year 1}
+s17_outcomes_cent
+f16_vars_cent #need a 3 dimension object to match the number of outcomes we have
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+f16_3vars_fidint_cent <- list(c("ppvt_f16_rawscore_cent","ppvt_f16_rawscore_cent : fd_y1_adh_avg_cent", "ppvt_f16_rawscore_cent : fd_y1_qual_avg_cent"),
+                      c("wap_f16_rawscore_cent","wap_f16_rawscore_cent : fd_y1_adh_avg_cent", "wap_f16_rawscore_cent : fd_y1_qual_avg_cent"),
+                      c("wap_f16_rawscore_cent","wap_f16_rawscore_cent : fd_y1_adh_avg_cent", "wap_f16_rawscore_cent : fd_y1_qual_avg_cent"))
+
+f16_3vars_fidint_cent
+
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg_cent", "fd_y1_qual_avg_cent", "(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y1 BLxFid Int Centered (BL only)",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg_cent", "fd_y1_qual_avg_cent", student_covs_cent,"(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y1 BLxFid Int Centered (BL + student chars)",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c("fd_y1_adh_avg_cent", "fd_y1_qual_avg_cent", student_covs_cent,parent_covs_cent,"(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y1 BLxFid Int Centered (full model)",
+             dfY = centered)
+
+```
+
+```{r year 2}
+s18_outcomes_cent
+f17_vars_cent
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+f17_fidint_cent <- list(c("ppvt_f17_rawscore_cent",       "ppvt_f17_rawscore_cent : fd_y2_adh_avg_cent",        "ppvt_f17_rawscore_cent : fd_y2_qual_avg_cent"),
+                    c("dbls_f17_lnf_score_cent",      "dbls_f17_lnf_score_cent : fd_y2_adh_avg_cent",       "dbls_f17_lnf_score_cent : fd_y2_qual_avg_cent"),
+                    c("wap_f17_rawscore_cent",        "wap_f17_rawscore_cent : fd_y2_adh_avg_cent",         "wap_f17_rawscore_cent : fd_y2_qual_avg_cent"),
+                    c("rema_f17_tscore_allitems_cent","rema_f17_tscore_allitems_cent : fd_y2_adh_avg_cent", "rema_f17_tscore_allitems_cent : fd_y2_qual_avg_cent"))
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg_cent", "fd_y2_qual_avg_cent", "(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y2 BLxFid Int Centered (BL only)",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg_cent", "fd_y2_qual_avg_cent", student_covs_cent, "(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y2 BLxFid Int Centered (BL + student chars)",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c("fd_y2_adh_avg_cent", "fd_y2_qual_avg_cent", student_covs_cent,parent_covs_cent,"(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y2 BLxFid Int Centered (full model)",
+             dfY = centered)
+
+```
+
+```{r year 3}
+s19_outcomes_cent
+s18_outcomes_cent
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+s18_fidint_cent <- list( c("ppvt_s18_rawscore_cent",       "ppvt_s18_rawscore_cent : fd_y3_adh_avg_cent",        "ppvt_s18_rawscore_cent : fd_y3_qual_avg_cent"),
+                    c("dbls_s18_lnf_score_cent",      "dbls_s18_lnf_score_cent : fd_y3_adh_avg_cent",       "dbls_s18_lnf_score_cent : fd_y3_qual_avg_cent"),
+                    c("wap_s18_rawscore_cent",        "wap_s18_rawscore_cent : fd_y3_adh_avg_cent",         "wap_s18_rawscore_cent : fd_y3_qual_avg_cent"),
+                    c("rema_s18_tscore_allitems_cent","rema_s18_tscore_allitems_cent : fd_y3_adh_avg_cent", "rema_s18_tscore_allitems_cent : fd_y3_qual_avg_cent"))
+s18_fidint_cent
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg_cent", "fd_y3_qual_avg_cent", "(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y3 BLxFid Int Centered (BL only)",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg_cent", "fd_y3_qual_avg_cent", student_covs_cent, "(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y3 BLxFid Int Centered (BL + student chars)",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c("fd_y3_adh_avg_cent", "fd_y3_qual_avg_cent", student_covs_cent,parent_covs_cent,"(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_fidint_cent,
+             filenameY = "BLxFid Int Centered/Y3 BLxFid Int Centered (full model)",
+             dfY = centered)
+
+```
+
+### Within Year (Sam's Covariates)
+
+```{r year 1}
+s17_outcomes_cent
+f16_vars_cent #need a 3 dimension object to match the number of outcomes we have
+
+f16_3vars <- c("ppvt_f16_rawscore_cent","wap_f16_rawscore_cent","wap_f16_rawscore_cent") #because we don't have a lwid/dibels at s17, we need a baseline covariate vector with 3 corresponding measures
+f16_3vars
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_std_covs, "peg", "(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Fidelity Cent StdCovs/Y1 Fidelity Cent StdCovs",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c(covs_cent_std, parent_covs_cent, y1_std_covs, "peg", "(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Fidelity Cent StdCovs/Y1 Fidelity Cent StdCovs (full model)",
+             dfY = centered)
+#tweaking the existing variable list
+y1_std_covs
+
+y1_notime <- y1_std_covs[-9]
+y1_notime
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_notime, "peg", "(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Fidelity Cent StdCovs/Y1 Fidelity Cent StdCovs (number of components)",
+             dfY = centered)
+
+y1_nocomp <- y1_std_covs[-8]
+y1_nocomp
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_nocomp, "peg", "(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Fidelity Cent StdCovs/Y1 Fidelity Cent StdCovs (total time)",
+             dfY = centered)
+
+
+```
+
+```{r year 2}
+s18_outcomes_cent
+f17_vars_cent
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_std_covs,"((1|school_id_y2/classidanlys_y2))"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Fidelity Cent StdCovs/Y2 Fidelity Cent StdCovs",
+             dfY = centered%>%filter(ies==1))
+
+mixed_export(OTHcovsY = c(covs_cent_std,parent_covs_cent, y2_std_covs,"((1|school_id_y2/classidanlys_y2))"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Fidelity Cent StdCovs/Y2 Fidelity Cent StdCovs (full model)",
+             dfY = centered%>%filter(ies==1))
+#tweaking the existing variable list
+y2_std_covs
+
+y2_notime <- y2_std_covs[-9]
+y2_notime
+
+f16_3vars <- c("ppvt_f16_rawscore_cent","wap_f16_rawscore_cent","wap_f16_rawscore_cent") #because we don't have a lwid/dibels at s17, we need a baseline covariate vector with 3 corresponding measures
+f16_3vars
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_notime, "peg", "((1|school_id_y2/classidanlys_y2))"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Fidelity Cent StdCovs/Y2 Fidelity Cent StdCovs (number of components)",
+             dfY = centered%>%filter(ies==1))
+
+y2_nocomp <- y2_std_covs[-8]
+y2_nocomp
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_nocomp, "peg", "((1|school_id_y2/classidanlys_y2))"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Fidelity Cent StdCovs/Y2 Fidelity Cent StdCovs (total time)",
+             dfY = centered%>%filter(ies==1))
+
+
+```
+
+```{r year 3}
+s19_outcomes_cent
+s18_outcomes_cent
+
+s18_bl <- c("ppvt_s18_rawscore_cent","ppvt_s18_rawscore_cent","wap_s18_rawscore_cent","rema_s18_tscore_allitems_cent") #switching in ppvt for dbls as a baseline covariate for lwid
+s18_bl
+
+mixed_export(OTHcovsY = c(covs_cent_std, y3_std_covs,"(1|school_id_y3/classidanlys_y3)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = s18_bl,
+             filenameY = "Fidelity Cent StdCovs/Y3 Fidelity Cent StdCovs",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c(covs_cent_std, parent_covs_cent, y3_std_covs,"(1|school_id_y3/classidanlys_y3)"),
+             outcomesY = s19_outcomes,
+             bl_varsY = s18_bl,
+             filenameY = "Fidelity Cent StdCovs/Y3 Fidelity Cent StdCovs (full model)",
+             dfY = centered)
+
+#tweaking the existing variable list
+y3_std_covs
+
+y3_notime <- y3_std_covs[-9]
+y3_notime
+
+mixed_export(OTHcovsY = c(covs_cent_std, y3_notime, "peg", "(1|school_id_y3/classidanlys_y3)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Fidelity Cent StdCovs/Y3 Fidelity Cent StdCovs (number of components)",
+             dfY = centered)
+
+y3_nocomp <- y3_std_covs[-8]
+y3_nocomp
+
+mixed_export(OTHcovsY = c(covs_cent_std, y3_nocomp, "peg", "(1|school_id_y3/classidanlys_y3)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Fidelity Cent StdCovs/Y3 Fidelity Cent StdCovs (total time)",
+             dfY = centered)
+
+```
+
+### Within Year BL x Fidelity Interaction (Centered + Sam's Covariates)
+
+```{r year 1}
+s17_outcomes_cent
+f16_vars_cent #need a 3 dimension object to match the number of outcomes we have
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+f16_3vars_fidint_cent <- list(c("ppvt_f16_rawscore_cent","ppvt_f16_rawscore_cent : fd_y1_adh_avg_cent", "ppvt_f16_rawscore_cent : fd_y1_qual_avg_cent"),
+                      c("wap_f16_rawscore_cent","wap_f16_rawscore_cent : fd_y1_adh_avg_cent", "wap_f16_rawscore_cent : fd_y1_qual_avg_cent"),
+                      c("wap_f16_rawscore_cent","wap_f16_rawscore_cent : fd_y1_adh_avg_cent", "wap_f16_rawscore_cent : fd_y1_qual_avg_cent"))
+
+f16_3vars_fidint_cent
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_std_covs,"peg","(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars_fidint_cent,
+             filenameY = "BLxFid Int Centered StdCovs/Y1 BLxFid Int Centered StdCovs (full model)",
+             dfY = centered)
+
+y1_nocomp <- y1_std_covs[-8]
+y1_nocomp
+
+mixed_export(OTHcovsY = c(covs_cent_std, parent_covs_cent, y1_nocomp,"peg","(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars_fidint_cent,
+             filenameY = "BLxFid Int Centered StdCovs/Y1 BLxFid Int Centered StdCovs (total time)",
+             dfY = centered)
+```
+
+```{r year 2}
+s18_outcomes_cent
+f17_vars_cent
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+f17_fidint_cent <- list(
+                    c("ppvt_f17_rawscore_cent",       "ppvt_f17_rawscore_cent : fd_y2_adh_avg_cent",        "ppvt_f17_rawscore_cent : fd_y2_qual_avg_cent"),
+                    c("dbls_f17_lnf_score_cent",      "dbls_f17_lnf_score_cent : fd_y2_adh_avg_cent",       "dbls_f17_lnf_score_cent : fd_y2_qual_avg_cent"),
+                    c("wap_f17_rawscore_cent",        "wap_f17_rawscore_cent : fd_y2_adh_avg_cent",         "wap_f17_rawscore_cent : fd_y2_qual_avg_cent"),
+                    c("rema_f17_tscore_allitems_cent","rema_f17_tscore_allitems_cent : fd_y2_adh_avg_cent", "rema_f17_tscore_allitems_cent : fd_y2_qual_avg_cent"))
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_std_covs,"(1|school_id_y2/classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_fidint_cent,
+             filenameY = "BLxFid Int Centered StdCovs/Y2 BLxFid Int Centered StdCovs (full model)",
+             dfY = centered%>%filter(ies==1))
+
+y2_nocomp <- y2_std_covs[-8]
+y2_nocomp
+
+mixed_export(OTHcovsY = c(covs_cent_std, parent_covs_cent, y2_nocomp,"(1|school_id_y2/classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_fidint_cent,
+             filenameY = "BLxFid Int Centered StdCovs/Y2 BLxFid Int Centered StdCovs (total time)",
+             dfY = centered%>%filter(ies==1))
+
+```
+
+```{r year 3}
+s19_outcomes_cent
+s18_outcomes_cent
+
+# use for BL_VARS parameter (list of BL covariate sets to be used for each respective outcome)
+s18_fidint_cent <- list(c("ppvt_s18_rawscore_cent",       "ppvt_s18_rawscore_cent : fd_y3_adh_avg_cent",        "ppvt_s18_rawscore_cent : fd_y3_qual_avg_cent"),
+                    c("ppvt_s18_rawscore_cent",      "ppvt_s18_rawscore_cent : fd_y3_adh_avg_cent",       "ppvt_s18_rawscore_cent : fd_y3_qual_avg_cent"),
+                    c("wap_s18_rawscore_cent",        "wap_s18_rawscore_cent : fd_y3_adh_avg_cent",         "wap_s18_rawscore_cent : fd_y3_qual_avg_cent"),
+                    c("rema_s18_tscore_allitems_cent","rema_s18_tscore_allitems_cent : fd_y3_adh_avg_cent", "rema_s18_tscore_allitems_cent : fd_y3_qual_avg_cent"))
+s18_fidint_cent
+
+mixed_export(OTHcovsY = c(covs_cent_std, y3_std_covs,"(1|school_id_y3/classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_fidint_cent,
+             filenameY = "BLxFid Int Centered StdCovs/Y3 BLxFid Int Centered StdCovs (full model)",
+             dfY = centered)
+
+y3_nocomp <- y3_std_covs[-8]
+y3_nocomp
+
+mixed_export(OTHcovsY = c(covs_cent_std, parent_covs_cent, y3_nocomp,"(1|school_id_y3/classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_fidint_cent,
+             filenameY = "BLxFid Int Centered StdCovs/Y3 BLxFid Int Centered StdCovs (total time)",
+             dfY = centered)
+```
+
+### Component Specific Runs
+```{r year 1}
+s17_outcomes_cent
+f16_vars_cent #need a 3 dimension object to match the number of outcomes we have
+
+f16_3vars <- c("ppvt_f16_rawscore_cent","wap_f16_rawscore_cent","wap_f16_rawscore_cent") #because we don't have a lwid/dibels at s17, we need a baseline covariate vector with 3 corresponding measures
+
+covs_cent_std
+y1_std_covs_nofid
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_std_covs_nofid,"fd_y1_ic_adhavg_cent","fd_y1_ic_qualavg_cent","peg","(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Component Specific/Y1 Intro to Centers",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_std_covs_nofid,"fd_y1_ctr_adhavg_cent","fd_y1_ctr_qualavg_cent","peg","(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Component Specific/Y1 Centers",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_std_covs_nofid,"fd_y1_sgll_adhavg_cent","fd_y1_sgll_qualavg_cent","peg","(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Component Specific/Y1 Lang_Lit SG",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_std_covs_nofid,"fd_y1_swpl_adhavg_cent","fd_y1_swpl_qualavg_cent","peg","(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Component Specific/Y1 Lang_Lit WG",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c(covs_cent_std, y1_std_covs_nofid,"fd_y1_ra_adhavg_cent","fd_y1_ra_qualavg_cent","peg","(1|classidanlys_y1)"),
+             outcomesY = s17_outcomes_cent,
+             bl_varsY = f16_3vars,
+             filenameY = "Component Specific/Y1 Read Aloud",
+             dfY = centered)
+
+```
+
+```{r year 2}
+s18_outcomes_cent
+f17_vars_cent
+
+y2_std_covs_nofid
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_std_covs_nofid,"fd_y2_ic_adhavg_cent","fd_y2_ic_qualavg_cent","(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Component Specific/Y2 Intro to Centers",
+             dfY = centered%>%filter(ies==1))
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_std_covs_nofid,"fd_y2_ctr_adhavg_cent","fd_y2_ctr_qualavg_cent","(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Component Specific/Y2 Centers",
+             dfY = centered%>%filter(ies==1))
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_std_covs_nofid,"fd_y2_sgll_adhavg_cent","fd_y2_sgll_qualavg_cent","(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Component Specific/Y2 Lang_Lit SG",
+             dfY = centered%>%filter(ies==1))
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_std_covs_nofid,"fd_y2_swpl_adhavg_cent","fd_y2_swpl_qualavg_cent","(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Component Specific/Y2 Lang_Lit WG",
+             dfY = centered%>%filter(ies==1))
+
+mixed_export(OTHcovsY = c(covs_cent_std, y2_std_covs_nofid,"fd_y2_ra_adhavg_cent","fd_y2_ra_qualavg_cent","(1|classidanlys_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Component Specific/Y2 Read Aloud",
+             dfY = centered%>%filter(ies==1))
+```
+
+
+```{r year 3}
+s19_outcomes_cent
+s18_outcomes_cent
+
+s18_bl <- c("ppvt_s18_rawscore_cent","ppvt_s18_rawscore_cent","wap_s18_rawscore_cent","rema_s18_tscore_allitems_cent") #switching in ppvt for dbls as a baseline covariate for lwid
+s18_bl
+y3_std_covs_nofid
+
+mixed_export(OTHcovsY = c(covs_cent_std, y3_std_covs_nofid, "fd_y3_stud_adhavg_cent", "fd_y3_stud_qualavg_cent", "(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl,
+             filenameY = "Component Specific/Y3 Studios",
+             dfY = centered)
+
+#the error here happens because we're including y2_y3_testdatediff_cent and fd_y3_obs_sumduravg_cent as covariates alongside the studios variable. I'm not sure why we get it in this model but not the other y3 models. I think it's because the sample size is so much smaller.
+
+# summary(centered$y2_y3_testdatediff_cent)
+# summary(centered$fd_y3_obs_sumduravg_cent)
+summary(centered$fd_y3_stud_adhavg_cent)
+summary(centered$fd_y3_stud_qualavg_cent)
+summary(centered$fd_y3_sgll_adhavg_cent)
+summary(centered$fd_y3_sgll_qualavg_cent)
+
+mixed_export(OTHcovsY = c(covs_cent_std, y3_std_covs_nofid,"fd_y3_sgll_adhavg_cent","fd_y3_sgll_qualavg_cent","(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl,
+             filenameY = "Component Specific/Y3 Lang_Lit SG",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c(covs_cent_std, y3_std_covs_nofid,"fd_y3_ph_adhavg_cent","fd_y3_ph_qualavg_cent","(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl,
+             filenameY = "Component Specific/Y3 Phonics",
+             dfY = centered)
+
+mixed_export(OTHcovsY = c(covs_cent_std, y3_std_covs_nofid,"fd_y3_ra_adhavg_cent","fd_y3_ra_qualavg_cent","(1|classidanlys_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl,
+             filenameY = "Component Specific/Y3 Read Aloud",
+             dfY = centered)
+
+```
+
+## 4 Class Median Based 
+```{r S18}
+mixed_export(OTHcovsY = c(ms4_class_vars,"(1|school_id_y1_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f16_vars_cent,
+             filenameY = "MS4Class/Median Based 4 Classes S18 (BL only)",
+             dfY = median_splits)
+
+mixed_export(OTHcovsY = c(ms4_class_vars, student_covs_cent,"(1|school_id_y1_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f16_vars_cent,
+             filenameY = "MS4Class/Median Based 4 Classes S18 (full model)",
+             dfY = median_splits)
+
+```
+
+```{r S19}
+mixed_export(OTHcovsY = c(ms4_class_vars,"(1|school_id_y1_y2)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = f16_vars_cent,
+             filenameY = "MS4Class/Median Based 4 Classes S19 (BL only)",
+             dfY = median_splits)
+
+mixed_export(OTHcovsY = c(ms4_class_vars, student_covs_cent, parent_covs_cent,"(1|school_id_y1_y2)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = f16_vars_cent,
+             filenameY = "MS4Class/Median Based 4 Classes S19 (full model)",
+             dfY = median_splits)
+
+```
+
+#Analysis with Non Attenders
+These analyses include the non-attenders as their own class. PEG students are considered to be non-attenders even if they have fidelity data unless otherwise specified.
+
+## Median Classes with Non Attenders
+```{r defining variables}
+
+class_vars_w_nonatts <- c("ms_class_hh", "ms_class_hm", "ms_class_lm", "ms_class_ll") #omit non attenders
+
+sust_env_covs <- c("child_age_f17_attpaper_sep1", 
+                      "bl_lunch", 
+                      "bl_females", 
+                      "bl_zpoth", 
+                      "bl_raceasian", 
+                      "bl_raceblack", 
+                      "bl_racehisp", 
+                      "bl_raceother",
+                   "ps_y1y2y3_mothage_cent",
+                      "ps_y1y2y3_hhsize_cent",
+                      "ps_y1y2y3_adultwork",
+                      "ps_y1y2y3_married",
+                      "ps_y1y2y3_parentage",
+                      # "ps_y1y2y3_parented_lths", reference
+                      "ps_y1y2y3_parented_2yrdeg",
+                      "ps_y1y2y3_parented_ba",
+                      "ps_y1y2y3_parented_graddeg")
+
+f17_vars_cent
+s18_bl_w_nonatts <- c("ppvt_s18_rawscore_cent","dbls_s18_lnf_score","wap_s18_rawscore_cent","rema_s18_tscore_allitems_cent") 
+
+s18_outcomes_cent
+s19_outcomes_cent
+```
+
+```{r sample sizes}
+model_vars_n <- w_nonatts_median_splits %>%
+    summarise(across(c(class_vars_w_nonatts,sust_env_covs,
+                       f17_vars_cent,s18_bl_w_nonatts,
+                       s18_outcomes_cent,s19_outcomes_cent),
+                     list(mean = mean, 
+                          sd = sd, 
+                          n = ~sum(!is.na(.x)), 
+                          n_miss = ~sum(is.na(.x))), 
+                     na.rm=TRUE, 
+                     .names="{col}.{fn}")) %>% 
+    pivot_longer(everything(), names_to = c("dependent", "function"), names_sep = "\\.") %>% 
+    pivot_wider(id_cols = "dependent", names_from = "function")
+
+write_xlsx(model_vars_n, path = "/data/share/fnc/ExCELP3/Secure/Analysis/Fidelity analysis/Y1 through Y3/output/predicting gains/MS_with_nonatts/Ns Median Based 5 classes with non-attenders.xlsx")
+
+```
+
+```{r f17}
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts/Median Based 5 classes with non-attenders F17 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+
+```
+
+
+```{r s18}
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts/Median Based 5 classes with non-attenders S18 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "MS_with_nonatts/Median Based 5 classes with non-attenders S18",
+             dfY = w_nonatts_median_splits)
+
+```
+
+```{r s19}
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts/Median Based 5 classes with non-attenders S19 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "MS_with_nonatts/Median Based 5 classes with non-attenders S19",
+             dfY = w_nonatts_median_splits)
+
+```
+
+## CLASS Covariate Robustness Checks
+```{r}
+y2_CLASS_covs <- c("cls_y2_classroom_org_cent", "cls_y2_em_support_cent", "cls_y2_instruct_support_cent")
+y2y3_CLASS_covs <- c("cls_y2y3_classroom_org_cent", "cls_y2y3_em_support_cent", "cls_y2y3_instruct_support_cent")
+
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs, y2_CLASS_covs, "(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "CLASS cov robustness checks/Median Based 5 classes with non-attenders CLASS covs S18",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs, y2y3_CLASS_covs, "(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "CLASS cov robustness checks/Median Based 5 classes with non-attenders CLASS covs S19",
+             dfY = w_nonatts_median_splits)
+
+```
+
+
+## Median Split Interactions
+
+### Free/Reduced Price Lunch x Fidelity Interaction
+```{r define new variable lists}
+
+class_vars_w_nonatts_lunchints<- c("ms_class_hh : bl_lunch", "ms_class_hm : bl_lunch", "ms_class_lm : bl_lunch", "ms_class_ll : bl_lunch")
+
+```
+
+
+```{r median split}
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS LunchxClass Int F17(No BL)",
+             dfY = w_nonatts_median_splits)
+
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS LunchxClass Int S18 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "MS_with_nonatts_Ints/MS LunchxClass Int S18",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS LunchxClass Int S19 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "MS_with_nonatts_Ints/MS LunchxClass Int S19",
+             dfY = w_nonatts_median_splits)
+
+```
+
+### DLL x Fidelity Interaction
+```{r define new variable lists}
+
+class_vars_w_nonatts_dllints<- c("ms_class_hh : bl_zpoth", "ms_class_hm : bl_zpoth", "ms_class_lm : bl_zpoth", "ms_class_ll : bl_zpoth")
+
+```
+
+
+```{r median split}
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS DLLxClass Int F17 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS DLLxClass Int S18 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "MS_with_nonatts_Ints/MS DLLxClass Int S18",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS DLLxClass Int S19 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "MS_with_nonatts_Ints/MS DLLxClass Int S19",
+             dfY = w_nonatts_median_splits)
+
+```
+
+### BlackHisp x Fidelity Interaction
+```{r define new variable lists}
+
+class_vars_w_nonatts_raceints<- c("ms_class_hh : bl_raceblackhisp", "ms_class_hm : bl_raceblackhisp", "ms_class_lm : bl_raceblackhisp", "ms_class_ll : bl_raceblackhisp")
+
+sust_env_covs_blackhisp <- c("child_age_f17_attpaper_sep1", 
+                      "bl_lunch", 
+                      "bl_females", 
+                      "bl_zpoth", 
+                      "bl_raceasian", 
+                      # "bl_raceblack", 
+                      # "bl_racehisp", 
+                      "bl_raceother",
+                      "bl_raceblackhisp", #replace black and hispanic with composite measure that matches interactions
+                   "ps_y1y2y3_mothage_cent",
+                      "ps_y1y2y3_hhsize_cent",
+                      "ps_y1y2y3_adultwork",
+                      "ps_y1y2y3_married",
+                      "ps_y1y2y3_parentage",
+                      # "ps_y1y2y3_parented_lths", reference
+                      "ps_y1y2y3_parented_2yrdeg",
+                      "ps_y1y2y3_parented_ba",
+                      "ps_y1y2y3_parented_graddeg")
+
+
+```
+
+
+```{r median split}
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS BlackHispxClass Int F17(No BL)",
+             dfY = w_nonatts_median_splits)
+
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS BlackHispxClass Int S18 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "MS_with_nonatts_Ints/MS BlackHispxClass Int S18",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "MS_with_nonatts_Ints/MS BlackHispxClass Int S19 (No BL)",
+             dfY = w_nonatts_median_splits)
+
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "MS_with_nonatts_Ints/MS BlackHispxClass Int S19",
+             dfY = w_nonatts_median_splits)
+
+#uncentered outcomes check
+mixed_export(OTHcovsY = c(class_vars_w_nonatts, class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes,
+             bl_varsY = f17_vars_cent,
+             filenameY = "MS_with_nonatts_Ints/MS BlackHispxClass Int S18 (Uncentered outcomes)",
+             dfY = w_nonatts_median_splits)
+
+```
+
+## Means for Graphing Interactions
+```{r}
+
+#Constant Coefficients
+ms_int_mean_vars <- c(f17_vars, s18_outcomes, s19_outcomes, "ps_y1y2y3_parentage", "child_age_f17_attpaper_sep1")
+
+ms_int_means <- w_nonatts_median_splits %>%
+    select(all_of(ms_int_mean_vars))%>%
+    summarise(across(everything(),
+                     list(mean = mean,
+                          sd = sd,
+                          n = ~sum(!is.na(.x)),
+                          n_miss = ~sum(is.na(.x))),
+                     na.rm=TRUE,
+                     .names="{col}.{fn}")) %>%
+    pivot_longer(everything(), names_to = c("measure", "function"), names_sep = "\\.") %>%
+    pivot_wider(id_cols = "measure", names_from = "function") %>%
+    rename(Overall_Mean = mean,
+           Overall_SD   = sd,
+           Overall_N    = n,
+           Overall_NMiss= n_miss)
+
+#BL Levels by group
+MS_racexHL_f17ppvt<-w_nonatts_median_splits%>%
+  filter(!is.na(ppvt_s18_rawscore_cent)&!is.na(ppvt_f17_rawscore_cent))%>% #need to only look at analysis sample--this is close enough 
+  group_by(bl_raceblackhisp,ms_class_hm)%>%
+  summarise(n = n(),
+            mean = mean(ppvt_f17_rawscore, na.rm = TRUE),
+            .groups="drop")
+
+MS_lunchxHL_f17wjap<-w_nonatts_median_splits%>%
+  filter(!is.na(wap_s18_rawscore_cent)&!is.na(wap_s17_rawscore_cent))%>%
+  group_by(bl_lunch,ms_class_hm)%>%
+  summarise(n = n(),
+            mean = mean(wap_f17_rawscore, na.rm = TRUE),
+            .groups="drop")
+
+MS_dllxLow_f17wjap<-w_nonatts_median_splits%>%
+  filter(!is.na(wap_s18_rawscore_cent)&!is.na(wap_s17_rawscore_cent))%>%
+  group_by(bl_zpoth,ms_class_ll)%>%
+  summarise(n = n(),
+            mean = mean(wap_f17_rawscore, na.rm = TRUE),
+            .groups="drop")
+
+MS_dllxHL_f17wjap<-w_nonatts_median_splits%>%
+  filter(!is.na(wap_s18_rawscore_cent)&!is.na(wap_s17_rawscore_cent))%>%
+  group_by(bl_zpoth,ms_class_hm)%>%
+  summarise(n = n(),
+            mean = mean(wap_f17_rawscore, na.rm = TRUE),
+            .groups="drop")
+
+MS_dllxHL_f18ppvt<-w_nonatts_median_splits%>%
+  filter(!is.na(ppvt_s19_rawscore_cent)&!is.na(ppvt_s18_rawscore_cent))%>%
+  group_by(bl_zpoth,ms_class_hm)%>%
+  summarise(n = n(),
+            mean = mean(ppvt_s18_rawscore, na.rm = TRUE),
+            .groups="drop")
+
+intgraph_means <- tibble::lst(ms_int_means,MS_racexHL_f17ppvt,MS_lunchxHL_f17wjap,MS_dllxLow_f17wjap,MS_dllxHL_f17wjap,MS_dllxHL_f18ppvt)
+# names(intgraph_means)<-intgraph_means
+
+writexl::write_xlsx(x = intgraph_means, path = paste0("/data/share/fnc/excelp3/Secure/Analysis/Fidelity analysis/Y1 through Y3/output/predicting gains/MS_with_nonatts_Ints/graphmeans.xlsx"))
+
+
+```
+
+```{r}
+mixed_export <- function(OTHcovsY,
+                         outcomesY,
+                         bl_varsY,
+                         filenameY,
+                         dfY = analytic_df) { #set the default dataframe to use 
+  main_BLonly_extract<-map2(.x = outcomesY, #.x represents outcomeX
+              .y = bl_varsY, #.y represents BLcovX
+              .f = mixed_extract,
+              OTHcovsX = OTHcovsY,
+              dfX = dfY)
+
+names(main_BLonly_extract) <- outcomesY
+
+writexl::write_xlsx(x = main_BLonly_extract, path = paste0("/data/share/fnc/excelp3/Secure/Analysis/Fidelity analysis/Y1 through Y3/output/predicting gains/",filenameY,".xlsx"))
+
+}
+```
+
+##LPA Analysis
+These analyses reference classes that were created in MPLUS via Latent Profile Analysis (LPA) rather than median splits
+
+### LPA 4 Class 292
+This analysis used a sample of 292 kids which includes non-attenders BUT DOESNT CONSIDER PEG STUDENTS TO BE NON-ATTENDERS. It is defunct, but included in here because you never know if you'll need it.
+```{r processing}
+analytic_df292 <- full_join(lpa_4class292%>%rename("lpa4_class292" = "class"),
+                         w_nonatts_median_splits,
+                         "studentid")%>%
+  mutate(
+    #create latent profile class dummies
+         lp_high_aligned = if_else(lpa4_class292==4,1,0,0),
+         lp_mixed_high_alignment = if_else(lpa4_class292==2,1,0,0),
+         lp_mixed_low_alignment = if_else(lpa4_class292==3,1,0,0),
+         lp_low_aligned = if_else(lpa4_class292==1,1,0,0))
+
+analytic_df292%>%select(starts_with("lp_"))%>%group_by_all()%>%tally()
+
+lpa_4class292_vars <- c("lp_high_aligned","lp_mixed_high_alignment","lp_mixed_low_alignment","lp_low_aligned")
+
+```
+
+```{r f17}
+mixed_export(OTHcovsY = c(lpa_4class292_vars, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class292/LPA 4 Class292 F17 (No BL)",
+             dfY = analytic_df292)
+
+```
+
+```{r s18}
+
+mixed_export(OTHcovsY = c(lpa_4class292_vars, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class292/LPA 4 Class292 S18 (No BL)",
+             dfY = analytic_df292)
+
+mixed_export(OTHcovsY = c(lpa_4class292_vars, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "LPA4Class292/LPA 4 Class292 S18",
+             dfY = analytic_df292)
+
+```
+
+```{r s19}
+
+mixed_export(OTHcovsY = c(lpa_4class292_vars, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class292/LPA 4 Class292 S19 (No BL)",
+             dfY = analytic_df292)
+
+mixed_export(OTHcovsY = c(lpa_4class292_vars, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "LPA4Class292/LPA 4 Class292 S19",
+             dfY = analytic_df292)
+
+```
+
+### LPA 4 Class No PEG
+```{r processing}
+analytic_df_nopeg <- full_join(lpa_4class_nopeg%>%rename("lpa4_class_nopeg" = "class"),
+                         w_nonatts_median_splits,
+                         "studentid")%>%
+  mutate(
+    #create latent profile class dummies
+         lp_high_aligned = if_else(lpa4_class_nopeg==4,1,0,0),
+         lp_mixed_hlh = if_else(lpa4_class_nopeg==2,1,0,0),
+         lp_mixed_hhl = if_else(lpa4_class_nopeg==3,1,0,0),
+         lp_low_aligned = if_else(lpa4_class_nopeg==1,1,0,0))
+
+analytic_df_nopeg%>%select(starts_with("lp_"),peg)%>%group_by_all()%>%tally()
+
+lpa_4class_nopeg_vars <- c("lp_high_aligned","lp_mixed_hlh","lp_mixed_hhl","lp_low_aligned")
+
+```
+
+```{r f17}
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG/LPA 4 Class No PEG F17 (No BL)",
+             dfY = analytic_df_nopeg)
+
+```
+
+```{r s18}
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG/LPA 4 Class No PEG S18 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "LPA4Class No PEG/LPA 4 Class No PEG S18",
+             dfY = analytic_df_nopeg)
+
+```
+
+```{r s19}
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG/LPA 4 Class No PEG S19 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "LPA4Class No PEG/LPA 4 Class No PEG S19",
+             dfY = analytic_df_nopeg)
+
+```
+
+## CLASS Covariate Robustness Checks (LPA)
+```{r}
+y2_CLASS_covs <- c("cls_y2_classroom_org_cent", "cls_y2_em_support_cent", "cls_y2_instruct_support_cent")
+y2y3_CLASS_covs <- c("cls_y2y3_classroom_org_cent", "cls_y2y3_em_support_cent", "cls_y2y3_instruct_support_cent")
+
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs, y2_CLASS_covs, "(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "CLASS cov robustness checks/LPA with CLASS covs S18",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs, y2y3_CLASS_covs, "(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "CLASS cov robustness checks/LPA with CLASS covs S19",
+             dfY = analytic_df_nopeg)
+
+```
+
+## LPA 4 Class (No PEG) Interactions
+### Free/Reduced Price Lunch x Fidelity Interaction
+```{r define new variable lists}
+
+lpa_class_vars_w_nonatts_lunchints<- c("lp_high_aligned : bl_lunch", "lp_mixed_hlh : bl_lunch", "lp_mixed_hhl : bl_lunch", "lp_low_aligned : bl_lunch")
+
+```
+
+```{r lpa}
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA LunchxClass Int F17(No BL)",
+             dfY = analytic_df_nopeg)
+
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA LunchxClass Int S18 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "LPA4Class No PEG Ints/LPA LunchxClass Int S18",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA LunchxClass Int S19 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_lunchints, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "LPA4Class No PEG Ints/LPA LunchxClass Int S19",
+             dfY = analytic_df_nopeg)
+
+```
+
+### DLL x Fidelity Interaction
+```{r define new variable lists}
+
+lpa_class_vars_w_nonatts_dllints<- c("lp_high_aligned : bl_zpoth", "lp_mixed_hlh : bl_zpoth", "lp_mixed_hhl : bl_zpoth", "lp_low_aligned : bl_zpoth")
+
+```
+
+```{r lpa}
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA DLLxClass Int F17 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA DLLxClass Int S18 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "LPA4Class No PEG Ints/LPA DLLxClass Int S18",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA DLLxClass Int S19 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_dllints, sust_env_covs,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "LPA4Class No PEG Ints/LPA DLLxClass Int S19",
+             dfY = analytic_df_nopeg)
+
+```
+
+### BlackHisp x Fidelity Interaction
+```{r define new variable lists}
+
+lpa_class_vars_w_nonatts_raceints<- c("lp_high_aligned : bl_raceblackhisp", "lp_mixed_hlh : bl_raceblackhisp", "lp_mixed_hhl : bl_raceblackhisp", "lp_low_aligned : bl_raceblackhisp")
+
+sust_env_covs_blackhisp <- c("child_age_f17_attpaper_sep1", 
+                      "bl_lunch", 
+                      "bl_females", 
+                      "bl_zpoth", 
+                      "bl_raceasian", 
+                      # "bl_raceblack", 
+                      # "bl_racehisp", 
+                      "bl_raceother",
+                      "bl_raceblackhisp", #replace black and hispanic with composite measure that matches interactions
+                   "ps_y1y2y3_mothage_cent",
+                      "ps_y1y2y3_hhsize_cent",
+                      "ps_y1y2y3_adultwork",
+                      "ps_y1y2y3_married",
+                      "ps_y1y2y3_parentage",
+                      # "ps_y1y2y3_parented_lths", reference
+                      "ps_y1y2y3_parented_2yrdeg",
+                      "ps_y1y2y3_parented_ba",
+                      "ps_y1y2y3_parented_graddeg")
+
+
+```
+
+```{r sust_env_covs}
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y2)"),
+             outcomesY = f17_vars_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA BlackHispxClass Int F17(No BL)",
+             dfY = analytic_df_nopeg)
+
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA BlackHispxClass Int S18 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y2)"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "LPA4Class No PEG Ints/LPA BlackHispxClass Int S18",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = 0,
+             filenameY = "LPA4Class No PEG Ints/LPA BlackHispxClass Int S19 (No BL)",
+             dfY = analytic_df_nopeg)
+
+mixed_export(OTHcovsY = c(lpa_4class_nopeg_vars, lpa_class_vars_w_nonatts_raceints, sust_env_covs_blackhisp,"(1|school_id_y3)"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "LPA4Class No PEG Ints/LPA BlackHispxClass Int S19",
+             dfY = analytic_df_nopeg)
+
+```
+
+##Fixed Effects Models
+
+```{r glm extract}
+
+glm_extract <- function(outcomeX, # the outcome (quoted)
+                          BLcovX, # the BL covariate (quoted)
+                          OTHcovsX,# a vector of covariates to be included in the model
+                          dfX)
+{
+#1) write formula
+model_formula <- create_formula(outcomeX,
+                              c(BLcovX,OTHcovsX))
+
+#2) run and tidy model
+model.result <- glm(model_formula, data=dfX)
+
+tidy.result <- broom::tidy(model.result)%>%
+  mutate(stars = case_when(p.value < .001 ~ "***",
+                           p.value < .01 ~ "**",
+                           p.value < .05 ~ "*",
+                           p.value < .1 ~ "\u2020", #unicode for dagger
+                           TRUE ~ " ")) #helps with vlookups if these are blanks instead of missings
+
+#3) Grab other output from results
+nobs <- data.frame("n",nobs(model.result))
+  names(nobs)[[1]] <- "term"
+  names(nobs)[[2]] <- "estimate"
+
+formula_text <- data.frame(paste(as.character(model_formula[2]), #as.character puts the '~' 2nd so I'm just reordering the output here
+                                         as.character(model_formula[1]),
+                                         as.character(model_formula[3]))) 
+names(formula_text)[[1]] <- "term"
+
+fit_stats <-glance(model.result)%>%
+  pivot_longer(cols = everything(),
+               names_to = "term",
+               values_to = "estimate")
+
+#4) Bind it all together
+extract <- tidy.result%>%
+  bind_rows(nobs)%>%
+  bind_rows(formula_text)%>%
+  bind_rows(fit_stats)
+
+return(extract)
+
+}
+
+test <- glm_extract(outcomeX = "ppvt_s19_rawscore",
+                    BLcovX = "ppvt_f16_rawscore",
+                    OTHcovsX = c(class_vars_w_nonatts,sust_env_covs,"school_id_y2"),
+                    dfX = w_nonatts_median_splits)
+
+n_distinct(w_nonatts_median_splits$school_id_y2)
+unique(w_nonatts_median_splits$school_id_y2)
+
+w_nonatts_median_splits%>%filter(!is.na(ppvt_s19_rawscore))%>%group_by(school_id_y2)%>%tally()
+#great! looks like all the schools with students with outcomes are being captured
+
+#prints for Meghan
+PPVT_y2schools_byschool <- w_nonatts_median_splits%>%filter(!is.na(ppvt_s18_rawscore)&!is.na(ppvt_f17_rawscore))%>%
+  group_by(school_id_y2,ms_class_hh,ms_class_hm,ms_class_lm,ms_class_ll)%>%tally()
+PPVT_y2schools_byprofile <- w_nonatts_median_splits%>%filter(!is.na(ppvt_s18_rawscore)&!is.na(ppvt_f17_rawscore))%>%
+  group_by(ms_class_hh,ms_class_hm,ms_class_lm,ms_class_ll,school_id_y2)%>%tally()
+
+
+PPVT_y3schools_byschool <- w_nonatts_median_splits%>%filter(!is.na(ppvt_s19_rawscore)&!is.na(ppvt_s18_rawscore))%>%
+  group_by(school_id_y3,ms_class_hh,ms_class_hm,ms_class_lm,ms_class_ll)%>%tally()
+PPVT_y3schools_byprofile <- w_nonatts_median_splits%>%filter(!is.na(ppvt_s19_rawscore)&!is.na(ppvt_s18_rawscore))%>%
+  group_by(ms_class_hh,ms_class_hm,ms_class_lm,ms_class_ll,school_id_y3)%>%tally()
+
+schoolprints <- list(PPVT_y2schools_byschool,PPVT_y2schools_byprofile,PPVT_y3schools_byschool,PPVT_y3schools_byprofile)
+names(schoolprints) <- c("PPVT_y2schools_byschool","PPVT_y2schools_byprofile","PPVT_y3schools_byschool","PPVT_y3schools_byprofile")
+
+
+writexl::write_xlsx(x = schoolprints, path = "/data/share/fnc/excelp3/Secure/Analysis/Fidelity analysis/Y1 through Y3/output/schoolprints.xlsx")
+
+
+```
+
+```{r glm export}
+#Let's bake the extract creation into a function
+glm_export <- function(OTHcovsY,
+                         outcomesY,
+                         bl_varsY,
+                         filenameY,
+                         dfY) {
+  extracts<-map2(.x = outcomesY, #.x represents outcomeX
+              .y = bl_varsY, #.y represents BLcovX
+              .f = glm_extract,
+              OTHcovsX = OTHcovsY,
+              dfX = dfY)
+
+names(extracts) <- outcomesY
+
+writexl::write_xlsx(x = extracts, path = paste0("/data/share/fnc/excelp3/Secure/Analysis/Fidelity analysis/Y1 through Y3/output/predicting gains/",filenameY,".xlsx"))
+
+}
+
+
+```
+
+### Median Split (4 Classes + Nonattenders)
+```{r s18}
+
+glm_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs,"school_id_y2"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Fixed Effects Checks/Median Based 5 classes with non-attenders S18",
+             dfY = w_nonatts_median_splits)
+
+glm_export(OTHcovsY = c(class_vars_w_nonatts, sust_env_covs,"school_id_y3"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "Fixed Effects Checks/Median Based 5 classes with non-attenders S19",
+             dfY = w_nonatts_median_splits)
+
+```
+
+### LPA Robustness Check (4 Classes + Nonattenders)
+```{r}
+
+glm_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs,"school_id_y2"),
+             outcomesY = s18_outcomes_cent,
+             bl_varsY = f17_vars_cent,
+             filenameY = "Fixed Effects Checks/LPA 5 classes with non-attenders S18",
+             dfY = analytic_df_nopeg)
+
+glm_export(OTHcovsY = c(lpa_4class_nopeg_vars, sust_env_covs,"school_id_y3"),
+             outcomesY = s19_outcomes_cent,
+             bl_varsY = s18_bl_w_nonatts,
+             filenameY = "Fixed Effects Checks/LPA 5 classes with non-attenders S19",
+             dfY = analytic_df_nopeg)
+
+```
